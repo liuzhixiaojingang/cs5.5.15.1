@@ -1,159 +1,154 @@
 import streamlit as st
 import numpy as np
-import pandas as pd
 from PIL import Image
-import joblib
-from torchvision.models import vgg11
 import torch
-from torchvision import transforms
-from sklearn.decomposition import PCA
+import torchvision.models as models
+import torchvision.transforms as transforms
+from torch import nn
+import pickle
+import pandas as pd
 import io
-import matplotlib.pyplot as plt
 
-# 设置页面标题和布局
-st.set_page_config(page_title="烧伤分类系统", layout="wide")
-st.title("烧伤分类系统")
-# 初始化时预训练 PCA（假设有预训练数据）
+# Load pre-trained models
 @st.cache_resource
 def load_models():
-    vgg_model = vgg11(pretrained=True).eval()
-    mlp_model = joblib.load('best_mlp_model.pkl')
+    # Load VGG11 model
+    vgg11 = models.vgg11(weights=models.VGG11_Weights.IMAGENET1K_V1)
+    vgg11.classifier = nn.Sequential(*list(vgg11.classifier.children())[:-1])  # Remove last layer
     
-    # 示例：用虚拟数据预训练 PCA（实际应用需替换为真实数据）
-    dummy_features = np.random.rand(100, 4096)  # 100 个样本，4096 维
-    pca = PCA(n_components=20).fit(dummy_features)
+    # Load PCA and MLP models
+    with open('pca_model.pkl', 'rb') as f:
+        pca = pickle.load(f)
+    with open('best_mlp_model.pkl', 'rb') as f:
+        mlp = pickle.load(f)
     
-    return vgg_model, mlp_model, pca
+    return vgg11, pca, mlp
 
-# 降维时直接 transform（不再 fit）
-if st.button("降维至20维", disabled=st.session_state.features is None):
-    if st.session_state.features is not None:
-        # 直接转换（无需再拟合）
-        pca_features = pca.transform(st.session_state.features.reshape(1, -1))
-        st.session_state.pca_features = pca_features.flatten()
-        st.success("降维完成！")
+vgg11, pca_model, mlp_model = load_models()
 
-# 图像预处理
-preprocess = transforms.Compose([
+# Image preprocessing
+transform = transforms.Compose([
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
 ])
 
-# 状态管理
+# Function to extract features
+def extract_features(image):
+    img_tensor = transform(image).unsqueeze(0)
+    with torch.no_grad():
+        features = vgg11(img_tensor)
+    return features.numpy().flatten()
+
+# Function to reduce dimensions
+def reduce_dimensions(features):
+    return pca_model.transform(features.reshape(1, -1))[0]
+
+# Function to predict class
+def predict_class(reduced_features):
+    return mlp_model.predict(reduced_features.reshape(1, -1))[0]
+
+# Streamlit app layout
+st.title("Burn Injury Classification System")
+
+# Initialize session state
 if 'features' not in st.session_state:
     st.session_state.features = None
-if 'pca_features' not in st.session_state:
-    st.session_state.pca_features = None
+if 'reduced_features' not in st.session_state:
+    st.session_state.reduced_features = None
 if 'prediction' not in st.session_state:
     st.session_state.prediction = None
-if 'uploaded_image' not in st.session_state:
-    st.session_state.uploaded_image = None
 
-# 侧边栏
-with st.sidebar:
-    st.header("操作面板")
-    uploaded_file = st.file_uploader("上传烧伤图片", type=["jpg", "jpeg", "png"])
+# Upload image
+uploaded_file = st.file_uploader("Upload a burn injury image", type=["jpg", "jpeg", "png"])
+if uploaded_file is not None:
+    image = Image.open(uploaded_file)
+    st.image(image, caption="Uploaded Image", use_column_width=True)
     
-    if uploaded_file is not None:
-        st.session_state.uploaded_image = Image.open(uploaded_file)
-        st.image(st.session_state.uploaded_image, caption="上传的图片", use_column_width=True)
+    # Process buttons in columns
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("Extract Features (4096D)"):
+            st.session_state.features = extract_features(image)
+            st.success("Features extracted successfully!")
+    
+    with col2:
+        if st.button("Reduce to 20 Dimensions"):
+            if st.session_state.features is not None:
+                st.session_state.reduced_features = reduce_dimensions(st.session_state.features)
+                st.success("Dimensionality reduced successfully!")
+            else:
+                st.warning("Please extract features first!")
+    
+    with col3:
+        if st.button("Predict Class"):
+            if st.session_state.reduced_features is not None:
+                st.session_state.prediction = predict_class(st.session_state.reduced_features)
+                st.success(f"Predicted class: {st.session_state.prediction}")
+            else:
+                st.warning("Please reduce dimensions first!")
 
-# 主界面
-col1, col2 = st.columns([1, 1])
+# Results display section
+st.header("Results")
 
-with col1:
-    st.header("特征提取")
+# Feature extraction results
+st.subheader("Feature Extraction Results")
+if st.session_state.features is not None:
+    st.write(f"Feature vector shape: {st.session_state.features.shape}")
     
-    if st.button("提取特征", disabled=st.session_state.uploaded_image is None):
-        if st.session_state.uploaded_image is not None:
-            # 预处理图像
-            img_tensor = preprocess(st.session_state.uploaded_image).unsqueeze(0)
-            
-            # 提取特征
-            with torch.no_grad():
-                features = vgg_model.features(img_tensor)
-                features = vgg_model.avgpool(features)
-                features = torch.flatten(features, 1)
-                features = vgg_model.classifier[:4](features)  # 获取倒数第二层特征
-            
-            st.session_state.features = features.numpy().flatten()
-            st.success("特征提取完成！")
-    
-    if st.session_state.features is not None:
-        st.write(f"提取的特征维度: {st.session_state.features.shape[0]}")
-        
-        # 下载特征按钮
-        buffer = io.BytesIO()
-        np.save(buffer, st.session_state.features)
-        buffer.seek(0)
-        st.download_button(
-            label="下载特征",
-            data=buffer,
-            file_name="extracted_features.npy",
-            mime="application/octet-stream"
-        )
+    # Download features
+    df_features = pd.DataFrame(st.session_state.features.reshape(1, -1))
+    csv = df_features.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Download Features as CSV",
+        data=csv,
+        file_name="extracted_features.csv",
+        mime="text/csv"
+    )
+else:
+    st.info("No features extracted yet.")
 
-with col2:
-    st.header("降维与预测")
-    
-    if st.button("降维至20维", disabled=st.session_state.features is None):
-        if st.session_state.features is not None:
-            # 使用PCA降维
-            pca_features = pca.fit_transform(st.session_state.features.reshape(1, -1))
-            st.session_state.pca_features = pca_features.flatten()
-            st.success("降维完成！")
-    
-    if st.session_state.pca_features is not None:
-        st.write(f"降维后的特征维度: {st.session_state.pca_features.shape[0]}")
-        
-        # 可视化降维结果
-        fig, ax = plt.subplots(figsize=(10, 4))
-        ax.bar(range(len(st.session_state.pca_features)), st.session_state.pca_features)
-        ax.set_title("降维后的20维特征")
-        ax.set_xlabel("特征维度")
-        ax.set_ylabel("特征值")
-        st.pyplot(fig)
-    
-    if st.button("预测分类", disabled=st.session_state.pca_features is None):
-        if st.session_state.pca_features is not None:
-            # 使用MLP模型进行预测
-            prediction = mlp_model.predict(st.session_state.pca_features.reshape(1, -1))
-            st.session_state.prediction = prediction[0]
-            st.success("预测完成！")
-    
-    if st.session_state.prediction is not None:
-        st.subheader("预测结果")
-        st.write(f"预测类别: {st.session_state.prediction}")
-        
-        # 类别解释
-        class_descriptions = {
-            0: "正常皮肤",
-            1: "浅二度烫伤",
-            2: "深二度烫伤",
-            3: "三度烫伤",
-            4: "电击烧伤",
-            5: "火焰烧伤"
-        }
-        st.write(f"类别描述: {class_descriptions.get(st.session_state.prediction, '未知类别')}")
+# Dimensionality reduction results
+st.subheader("Dimensionality Reduction Results")
+if st.session_state.reduced_features is not None:
+    st.write(f"Reduced feature vector shape: {st.session_state.reduced_features.shape}")
+    st.write("Reduced features:")
+    st.write(st.session_state.reduced_features)
+else:
+    st.info("No dimensionality reduction performed yet.")
 
-# 融合结果显示
-if st.session_state.features is not None and st.session_state.pca_features is not None:
-    st.header("特征融合结果")
-    
-    # 创建DataFrame显示特征
-    df = pd.DataFrame({
-        "原始特征": st.session_state.features[:20],  # 只显示前20维
-        "降维特征": np.concatenate([st.session_state.pca_features, np.zeros(20 - len(st.session_state.pca_features))])
-    })
-    
-    st.dataframe(df.style.format("{:.4f}"), height=400)
-    
-    # 可视化对比
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(df["原始特征"], label="原始特征(前20维)")
-    ax.plot(df["降维特征"], label="降维特征")
-    ax.legend()
-    ax.set_title("原始特征与降维特征对比")
-    st.pyplot(fig)
+# Prediction results
+st.subheader("Prediction Results")
+if st.session_state.prediction is not None:
+    st.write(f"Predicted burn class: {st.session_state.prediction}")
+    # Add class descriptions if available
+    class_descriptions = {
+        0: "未检测出烧烫伤",
+        1: "浅二度烫伤",
+        2: "深二度烫伤",
+        3: "三度烫伤",
+        4: "电击烧伤",
+        5: "火焰烧伤"
+    }
+    st.write(f"Description: {class_descriptions.get(st.session_state.prediction, 'Unknown class')}")
+else:
+    st.info("No prediction made yet.")
+
+# Instructions section
+st.sidebar.header("Instructions")
+st.sidebar.write("""
+1. Upload a burn injury image (JPG/PNG)
+2. Click 'Extract Features' to get 4096D features
+3. Click 'Reduce to 20 Dimensions' for PCA
+4. Click 'Predict Class' for final classification
+""")
+
+# Model information
+st.sidebar.header("Model Information")
+st.sidebar.write("""
+- **Feature Extraction**: VGG11 (pretrained on ImageNet)
+- **Dimensionality Reduction**: PCA (20 components)
+- **Classifier**: MLP (pre-trained)
+""")
